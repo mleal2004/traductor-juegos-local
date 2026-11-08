@@ -7,3 +7,4 @@ pillow
 numpy
 torch
 customtkinter
+opencv-python-headless

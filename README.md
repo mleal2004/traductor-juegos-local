@@ -15,8 +15,9 @@ Herramientas para **traducir del japonés al español, sin internet**, textos de
 | `traducir_unity_raw.py` | Unity (Mono): busca cadenas japonesas serializadas en `level*`/`*.assets` y las reescribe en español. |
 | `traducir_godot_pck.py` | Godot 4: traduce los `.translation` de un `.pck` y lo reempaqueta. |
 | `traductor_local.py` | Servidor local (API tipo LibreTranslate) y ventana que traduce lo que copies al portapapeles. |
-| `traductor_ocr.py` | **Aplicación con interfaz**: vista en vivo de la ventana de un juego (aunque otra app la tape), OCR y traducción en tiempo real, capa sobre el juego, selector de 202 idiomas y gestor para descargar/listar/elegir/eliminar modelos. |
+| `traductor_ocr.py` | **Aplicación con interfaz**: vista en vivo de la ventana de un juego (aunque otra app la tape), **detección automática del texto (menús, frases, palabras) sin marcar zonas**, OCR y traducción en tiempo real, cada traducción dibujada sobre su propio texto, selector de 202 idiomas y gestor para descargar/listar/elegir/eliminar modelos. |
 | `idiomas.py` | Los 202 idiomas del modelo con nombre en español y su equivalencia con el OCR de Windows. |
+| `deteccion.py` | Detección y seguimiento de texto en tiempo real (OpenCV): encuentra cada línea de texto de la ventana sin marcar zonas, la sigue entre fotogramas y solo lee con OCR lo nuevo. |
 | `ocr_windows.ps1` | Puente con el OCR integrado de Windows (para idiomas distintos del japonés). |
 
 ## Instalación
@@ -38,6 +39,9 @@ python -c "from huggingface_hub import snapshot_download as s; s('kha-white/mang
 ```
 
 Las carpetas `modelo_nllb` y `modelo_ocr` deben quedar junto a los scripts. También puedes descargarlos (y otros más ligeros o más precisos) desde la propia aplicación `traductor_ocr.py`, botón **⬇ Modelos**.
+
+### Detección automática
+El traductor busca el texto solo en cada fotograma (no hace falta marcar nada). Si quieres, puedes limitar la búsqueda arrastrando un área sobre la vista. El ajuste «Sensibilidad» controla cuánto texto dudoso se acepta. Las opciones de menú más comunes (Nueva partida, Continuar, Opciones, Salir…) se traducen con un glosario porque el modelo falla con frases muy cortas.
 
 ### Idiomas y OCR
 La traducción acepta los 202 idiomas de NLLB-200 (elige origen y destino en la barra superior). El OCR usa **manga-ocr** para japonés y el **OCR de Windows** para el resto de idiomas: Windows solo lee los idiomas que tengan su paquete de OCR instalado (Configuración → Hora e idioma → Idioma y región → Añadir un idioma).

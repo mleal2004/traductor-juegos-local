@@ -22,6 +22,8 @@ function Await($op, $type) {
 
 while ($null -ne ($line = [Console]::In.ReadLine())) {
     try {
+        $modo = 'T'
+        if ($line.StartsWith('L|')) { $modo = 'L'; $line = $line.Substring(2) }
         $partes = $line.Split('|', 2)
         if ($partes[0] -eq 'IDIOMAS') {
             $tags = @([Windows.Media.Ocr.OcrEngine]::AvailableRecognizerLanguages | ForEach-Object { $_.LanguageTag })
@@ -35,6 +37,21 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         $dec    = Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
         $bmp    = Await ($dec.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
         $res    = Await ($eng.RecognizeAsync($bmp)) ([Windows.Media.Ocr.OcrResult])
+        if ($modo -eq 'L') {
+            # cada línea con su rectángulo (unión de los rectángulos de sus palabras)
+            $out = New-Object System.Collections.ArrayList
+            foreach ($l in $res.Lines) {
+                $x0 = [double]::MaxValue; $y0 = [double]::MaxValue; $x1 = 0.0; $y1 = 0.0
+                foreach ($w in $l.Words) {
+                    $r = $w.BoundingRect
+                    if ($r.X -lt $x0) { $x0 = $r.X }; if ($r.Y -lt $y0) { $y0 = $r.Y }
+                    if ($r.X + $r.Width -gt $x1) { $x1 = $r.X + $r.Width }; if ($r.Y + $r.Height -gt $y1) { $y1 = $r.Y + $r.Height }
+                }
+                [void]$out.Add(@{ t = $l.Text; x = [int]$x0; y = [int]$y0; w = [int]($x1 - $x0); h = [int]($y1 - $y0) })
+            }
+            (@{ lineas = $out.ToArray() } | ConvertTo-Json -Compress -Depth 4)
+            continue
+        }
         $lineas = @($res.Lines | ForEach-Object { $_.Text })
         (@{ text = ($lineas -join "`n") } | ConvertTo-Json -Compress)
     } catch {

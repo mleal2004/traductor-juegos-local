@@ -64,6 +64,39 @@ SIN_ESPACIOS = ("jpn_Jpan", "zho_Hans", "zho_Hant", "yue_Hant", "tha_Thai")   # 
 CJK = ("jpn_Jpan", "zho_Hans", "zho_Hant", "yue_Hant", "kor_Hang")
 
 
+# Glosario de menús y botones típicos de juegos japoneses: el modelo traduce mal las frases de 1–3 palabras,
+# así que estas se traducen por diccionario (japonés → español / inglés).
+GLOSARIO = {
+    ("jpn_Jpan", "spa_Latn"): {
+        "はじめから": "Nueva partida", "初めから": "Nueva partida", "ニューゲーム": "Nueva partida", "つづきから": "Continuar", "続きから": "Continuar",
+        "コンティニュー": "Continuar", "ロード": "Cargar", "セーブ": "Guardar", "ロードする": "Cargar", "セーブする": "Guardar",
+        "コンフィグ": "Opciones", "オプション": "Opciones", "設定": "Ajustes", "環境設定": "Ajustes", "ゲームをおわる": "Salir del juego",
+        "ゲームを終わる": "Salir del juego", "ゲーム終了": "Salir del juego", "終了": "Salir", "おわる": "Salir", "やめる": "Salir",
+        "スキップ": "Saltar", "オート": "Auto", "バックログ": "Historial", "ログ": "Historial", "ギャラリー": "Galería", "回想": "Recuerdos",
+        "回想モード": "Recuerdos", "CGモード": "Galería de CG", "音楽": "Música", "タイトルへ": "Volver al título", "タイトルに戻る": "Volver al título",
+        "戻る": "Volver", "閉じる": "Cerrar", "はい": "Sí", "いいえ": "No", "決定": "Aceptar", "キャンセル": "Cancelar", "メニュー": "Menú",
+        "ステータス": "Estado", "アイテム": "Objetos", "スキル": "Habilidades", "装備": "Equipo", "セーブデータ": "Datos guardados",
+        "クイックセーブ": "Guardado rápido", "クイックロード": "Carga rápida", "全画面": "Pantalla completa", "ウィンドウ": "Ventana",
+    },
+    ("jpn_Jpan", "eng_Latn"): {
+        "はじめから": "New Game", "初めから": "New Game", "ニューゲーム": "New Game", "つづきから": "Continue", "続きから": "Continue",
+        "コンティニュー": "Continue", "ロード": "Load", "セーブ": "Save", "コンフィグ": "Options", "オプション": "Options", "設定": "Settings",
+        "ゲームをおわる": "Quit Game", "ゲームを終わる": "Quit Game", "ゲーム終了": "Quit Game", "終了": "Quit", "スキップ": "Skip",
+        "オート": "Auto", "バックログ": "Log", "ギャラリー": "Gallery", "回想": "Recollections", "戻る": "Back", "閉じる": "Close",
+        "はい": "Yes", "いいえ": "No", "決定": "OK", "キャンセル": "Cancel", "メニュー": "Menu",
+    },
+}
+
+
+def buscar_glosario(texto: str, origen: str, destino: str):
+    """Traducción del glosario si el texto (sin espacios ni signos finales) coincide exactamente; si no, None."""
+    d = GLOSARIO.get((origen, destino))
+    if not d:
+        return None
+    t = texto.strip().replace(" ", "").replace("　", "").rstrip("。、…・!！?？")
+    return d.get(t)
+
+
 def nombre(cod: str) -> str:
     return NOMBRES.get(cod, cod)
 

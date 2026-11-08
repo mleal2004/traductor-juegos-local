@@ -30,6 +30,7 @@ import numpy as np
 from PIL import Image, ImageGrab, ImageTk
 
 sys.path.insert(0, str(Path(__file__).parent))
+import deteccion
 import idiomas
 
 RAIZ = Path(__file__).parent
@@ -50,17 +51,21 @@ ACC, ACC_H, OK, WARN, BAD = "#6f8cff", "#8ba2ff", "#3ddc97", "#ffb454", "#ff6b6b
 _ocr = None
 
 
+_ocr_lock = threading.Lock()
+
+
 def cargar_ocr():
     global _ocr
-    if _ocr is None:
-        import torch
-        from transformers import AutoImageProcessor, VisionEncoderDecoderModel
-        ruta = RUTA["ocr"]
-        proc = AutoImageProcessor.from_pretrained(str(ruta))
-        modelo = VisionEncoderDecoderModel.from_pretrained(str(ruta)).eval()
-        vocab = [l.rstrip("\n") for l in open(ruta / "vocab.txt", encoding="utf-8")]
-        _ocr = (proc, modelo, vocab, torch)
-    return _ocr
+    with _ocr_lock:
+        if _ocr is None:
+            import torch
+            from transformers import AutoImageProcessor, VisionEncoderDecoderModel
+            ruta = RUTA["ocr"]
+            proc = AutoImageProcessor.from_pretrained(str(ruta))
+            modelo = VisionEncoderDecoderModel.from_pretrained(str(ruta)).eval()
+            vocab = [l.rstrip("\n") for l in open(ruta / "vocab.txt", encoding="utf-8")]
+            _ocr = (proc, modelo, vocab, torch)
+        return _ocr
 
 
 # ═══════════════════════════════════════════════════════════════ Catálogo de modelos
@@ -241,12 +246,12 @@ def dividir_lineas(img: Image.Image):
     return lineas
 
 
-def trocear_linea(img: Image.Image):
+def trocear_linea(img: Image.Image, letras=4):
     """Parte un renglón ancho en tramos de unas 4 letras, cortando por los huecos entre letras."""
     m = mascara_tinta(img)
     h, w = img.height, img.width
     col = m.mean(axis=0) > 0.01
-    objetivo, maximo = int(h * 0.75 * 4), int(h * 0.75 * 6)
+    objetivo, maximo = int(h * 0.75 * letras), int(h * 0.75 * (letras + 2))
     tramos, ini = [], 0
     while ini < w:
         fin = min(w, ini + objetivo)
@@ -310,6 +315,26 @@ class OcrWindows:
             return None
         return next((t for t in self.instalados if t.lower().startswith(base.lower())), None)
 
+    def leer_lineas(self, img, origen):
+        """Lee todo el fotograma y devuelve cada línea con su posición: [(texto, (x0, y0, x1, y1))]."""
+        tag = self.etiqueta(origen)
+        if not tag:
+            raise RuntimeError("Windows no tiene OCR para " + idiomas.nombre(origen))
+        ruta = os.path.join(tempfile.gettempdir(), f"traductor_ocr_{os.getpid()}_f.png")
+        img.save(ruta)
+        r = self._pedir(f"L|{tag}|{ruta}")
+        if "error" in r:
+            raise RuntimeError(r["error"])
+        lineas = r.get("lineas", [])
+        lineas = [lineas] if isinstance(lineas, dict) else lineas
+        sin_espacios = origen in idiomas.SIN_ESPACIOS
+        out = []
+        for l in lineas:
+            t = l.get("t", "").replace(" ", "") if sin_espacios else l.get("t", "").strip()
+            if t:
+                out.append((t, (l["x"], l["y"], l["x"] + l["w"], l["y"] + l["h"])))
+        return out
+
     def leer(self, img, origen):
         tag = self.etiqueta(origen)
         if not tag:
@@ -343,6 +368,80 @@ def usa_manga(origen):
 
 def ocr_region(img: Image.Image, origen="jpn_Jpan") -> str:
     return ocr_manga(img) if usa_manga(origen) else ocr_win.leer(img, origen)
+
+
+# ── lectura para la detección automática (ver deteccion.py)
+def leer_lote_conf(imgs) -> list:
+    """Como leer_lote, pero devuelve también la confianza (0–1) de cada lectura."""
+    if not imgs:
+        return []
+    proc, modelo, vocab, torch = cargar_ocr()
+    pv = proc([i.convert("L").convert("RGB") for i in imgs], return_tensors="pt").pixel_values
+    with torch.no_grad():
+        out = modelo.generate(pv, max_length=60, output_scores=True, return_dict_in_generate=True)
+    sc = getattr(out, "sequences_scores", None)
+    res = []
+    for b, ids in enumerate(out.sequences.tolist()):
+        toks = []
+        for i in ids:
+            if i == 3:
+                break
+            if i < 5:
+                continue
+            t = vocab[i]
+            toks.append(t[2:] if t.startswith("##") else t)
+        res.append((limpiar("".join(toks)), float(np.exp(float(sc[b]))) if sc is not None else 1.0))
+    return res
+
+
+def ocr_cajas(crops) -> list:
+    """OCR de japonés para varias cajas de texto. Devuelve [(texto, confianza)] en el mismo orden."""
+    piezas, dueno = [], []
+    for k, c in enumerate(crops):
+        # un texto corto se lee entero (más fiable); solo los muy largos se parten en trozos de ~8 letras
+        partes = [c] if c.width / max(1, c.height) <= 10 else trocear_linea(c, 8)
+        for t in partes:
+            piezas.append(a_cuadrado(t))
+            dueno.append(k)
+    por = [[] for _ in crops]
+    for k, lect in zip(dueno, leer_lote_conf(piezas)):
+        por[k].append(lect)
+    return [("".join(t for t, _ in p), float(np.mean([c for _, c in p])) if p else 0.0) for p in por]
+
+
+def ocr_ventana(frame, origen):
+    """OCR de Windows sobre todo el fotograma: [(texto, (x0, y0, x1, y1))] por línea."""
+    return ocr_win.leer_lineas(frame, origen)
+
+
+def maquetar(es, bbox, estilo, raiz, max_x):
+    """Dónde y cómo dibujar la traducción de un texto: (rect, texto con saltos, tamaño, fondo, color, negrita).
+    Una línea suelta (p. ej. una opción de menú) puede crecer a la derecha; una frase de varias líneas se ajusta a su caja."""
+    bg, fg, tam0, neg = estilo
+    x0, y0, x1, y1 = bbox
+    bw, bh = x1 - x0, y1 - y0
+    una = bh < tam0 * 1.9
+    permitido = max(bw, min(max_x - x0 - 4, int(bw * 1.7) + 50)) if una else bw
+    lineas, tam, f = [es], 9, None
+    for tam in range(min(tam0 + 2, 42), 8, -1):
+        f = tkfont.Font(root=raiz, family="Segoe UI", size=-tam, weight="bold" if neg else "normal")
+        lineas, act = [], ""
+        for p in es.split():
+            prueba = (act + " " + p).strip()
+            if f.measure(prueba) > permitido - 12 and act:
+                lineas.append(act)
+                act = p
+            else:
+                act = prueba
+        lineas.append(act)
+        alto = len(lineas) * f.metrics("linespace")
+        if (una and len(lineas) == 1) or (not una and alto <= bh + 6):
+            break
+    ancho = max(f.measure(l) for l in lineas) + 12
+    alto = len(lineas) * f.metrics("linespace")
+    h_rect = max(bh + 2, alto + 4)
+    rect = (x0 - 3, y0 - 1, max(x1 + 3, x0 + ancho), y0 - 1 + h_rect)
+    return rect, "\n".join(lineas), tam, bg, fg, neg
 
 
 def estilo(crop: Image.Image):
@@ -761,32 +860,35 @@ class App(ctk.CTk):
         self.cap.start()
         self.hwnd = None
         self.titulo = None
-        self.zonas = []
-        self.est = []          # estado por zona
+        self.zonas = []        # áreas opcionales que limitan dónde se busca texto (vacío = toda la ventana)
         self.activo = False
         self.listo = {"ocr": False, "trad": False, "error": ""}
-        self.gen = 0
-        self.cola_trab, self.cola_res = queue.Queue(), queue.Queue()
         self.ultimo_jp, self.ultimo_es = "", ""
         self.vista = (0, 0, 1.0)   # origen x, y y escala de la vista previa
-        self.seq_dibujado = -1
+        self.seq_dibujado, self._ver_dibujada, self._firma_textos = -1, -1, None
         self.sucio = True
-        self.t_ciclo = 0.0
         self.arrastre = None
         self.foto = None
         self.capa_firma = None
         self.gestor = None
+        self._maq_cache = {}
+        self.tapadas = 0
+        self._t_capa = 0.0
         o_ = self.cfg["opciones"]
         self.origen = org or o_.get("origen", "jpn_Jpan")
         self.destino = dst or o_.get("destino", "spa_Latn")
+        self.velocidad = o_.get("velocidad", "Normal")
+        self.sens = o_.get("sensibilidad", "Media")
         self.faltan = self._calc_faltan()
+        self.an = deteccion.Analizador(self, dict(
+            usa_manga=usa_manga, ocr_cajas=ocr_cajas, ocr_ventana=ocr_ventana, estilo=estilo,
+            traducir=lambda t: __import__("traductor_local").traducir_texto(t)))
         self._construir()
         self._crear_capa()
         threading.Thread(target=self._cargar_modelos, daemon=True).start()
         threading.Thread(target=ocr_win.cargar_idiomas, daemon=True).start()
         if self.faltan:
             self.after(900, self.abrir_modelos)
-        threading.Thread(target=self._trabajador, daemon=True).start()
         self.protocol("WM_DELETE_WINDOW", self._cerrar)
         self._refrescar_ventanas()
         o = self.cfg["opciones"]
@@ -862,7 +964,7 @@ class App(ctk.CTk):
         self.lienzo.bind("<B1-Motion>", self._arrastra)
         self.lienzo.bind("<ButtonRelease-1>", self._suelta)
         self.lienzo.bind("<Button-3>", self._borrar_en)
-        ctk.CTkLabel(cen, text="Arrastra sobre la imagen para marcar dónde sale el texto  ·  clic derecho sobre una zona para quitarla",
+        ctk.CTkLabel(cen, text="El texto se detecta solo en toda la ventana  ·  (opcional) arrastra para limitar la búsqueda a un área; clic derecho la quita",
                      font=F(12), text_color=MUTED).grid(row=2, column=0, pady=(8, 12))
 
         # Panel derecho
@@ -870,14 +972,14 @@ class App(ctk.CTk):
         der.grid(row=1, column=2, sticky="ns", padx=(8, 16), pady=14)
         der.grid_propagate(False)
         der.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(der, text="2 · ZONAS DE TEXTO", font=F(11, "bold"), text_color=ACC).grid(row=0, column=0, sticky="w", padx=16, pady=(14, 4))
+        ctk.CTkLabel(der, text="2 · ÁREAS (OPCIONAL)", font=F(11, "bold"), text_color=ACC).grid(row=0, column=0, sticky="w", padx=16, pady=(14, 4))
         self.zonas_frame = ctk.CTkFrame(der, fg_color=SURF2, corner_radius=10)
         self.zonas_frame.grid(row=1, column=0, sticky="ew", padx=12)
         fila = ctk.CTkFrame(der, fg_color="transparent")
         fila.grid(row=2, column=0, sticky="ew", padx=12, pady=8)
-        ctk.CTkButton(fila, text="✨ Sugerir cuadro de diálogo", height=32, corner_radius=9, fg_color=SURF2, hover_color=BORDE,
+        ctk.CTkButton(fila, text="Solo el cuadro de diálogo", height=32, corner_radius=9, fg_color=SURF2, hover_color=BORDE,
                       text_color=TXT, font=F(12), command=self._sugerir).pack(side="left", expand=True, fill="x", padx=(0, 4))
-        ctk.CTkButton(fila, text="Borrar todas", height=32, width=96, corner_radius=9, fg_color=SURF2, hover_color=BAD,
+        ctk.CTkButton(fila, text="Quitar", height=32, width=76, corner_radius=9, fg_color=SURF2, hover_color=BAD,
                       text_color=TXT, font=F(12), command=self._borrar_todas).pack(side="left")
 
         ctk.CTkLabel(der, text="3 · AJUSTES", font=F(11, "bold"), text_color=ACC).grid(row=3, column=0, sticky="w", padx=16, pady=(6, 4))
@@ -891,10 +993,16 @@ class App(ctk.CTk):
         (self.sw_capa.select() if o.get("capa", True) else self.sw_capa.deselect())
         (self.sw_estilo.select() if o.get("estilo", True) else self.sw_estilo.deselect())
         ctk.CTkLabel(aj, text="Velocidad de lectura", font=F(12), text_color=MUTED).pack(anchor="w", padx=14, pady=(6, 2))
-        self.seg_vel = ctk.CTkSegmentedButton(aj, values=list(VELOCIDADES), font=F(12), selected_color=ACC, selected_hover_color=ACC_H,
+        self.seg_vel = ctk.CTkSegmentedButton(aj, values=list(deteccion.INTERVALOS), font=F(12), selected_color=ACC, selected_hover_color=ACC_H,
                                               unselected_color=BORDE, command=lambda v: self._guardar_opciones())
-        self.seg_vel.pack(fill="x", padx=14, pady=(0, 14))
-        self.seg_vel.set(o.get("velocidad", "Normal"))
+        self.seg_vel.pack(fill="x", padx=14, pady=(0, 8))
+        self.seg_vel.set(self.velocidad)
+        ctk.CTkLabel(aj, text="Sensibilidad (alta = detecta más, pero puede inventar textos)", font=F(12), text_color=MUTED, wraplength=300,
+                     justify="left").pack(anchor="w", padx=14, pady=(2, 2))
+        self.seg_sens = ctk.CTkSegmentedButton(aj, values=["Baja", "Media", "Alta"], font=F(12), selected_color=ACC, selected_hover_color=ACC_H,
+                                               unselected_color=BORDE, command=lambda v: self._guardar_opciones())
+        self.seg_sens.pack(fill="x", padx=14, pady=(0, 14))
+        self.seg_sens.set(self.sens)
 
         ctk.CTkLabel(der, text="4 · TRADUCCIÓN", font=F(11, "bold"), text_color=ACC).grid(row=5, column=0, sticky="w", padx=16, pady=(10, 4))
         res = ctk.CTkFrame(der, fg_color=SURF2, corner_radius=10)
@@ -947,9 +1055,10 @@ class App(ctk.CTk):
         self.sucio = True
 
     def _reiniciar_estado(self):
-        self.gen += 1
-        self.est = [{"sig": None, "estable": 0, "hecho": None, "dibujo": None, "ocupado": False} for _ in self.zonas]
+        self.an.reiniciar()
+        self._firma_textos = None
         self._mostrar_textos("", "")
+        self.sucio = True
 
     # ─────────────────────────────── zonas
     def _guardar_zonas(self):
@@ -960,13 +1069,13 @@ class App(ctk.CTk):
         for w in self.zonas_frame.winfo_children():
             w.destroy()
         if not self.zonas:
-            ctk.CTkLabel(self.zonas_frame, text="Aún no hay zonas.\nArrastra sobre la vista en vivo.", font=ctk.CTkFont(family="Segoe UI", size=12),
-                         text_color=MUTED, justify="left").pack(padx=14, pady=14, anchor="w")
+            ctk.CTkLabel(self.zonas_frame, text="Sin áreas: busco texto en toda la ventana.\nArrastra sobre la vista solo si quieres limitar la búsqueda.",
+                         font=ctk.CTkFont(family="Segoe UI", size=12), text_color=MUTED, justify="left", wraplength=290).pack(padx=14, pady=12, anchor="w")
             return
         for i, z in enumerate(self.zonas):
             fila = ctk.CTkFrame(self.zonas_frame, fg_color="transparent")
             fila.pack(fill="x", padx=8, pady=3)
-            ctk.CTkLabel(fila, text=f"▭  Zona {i + 1}", font=ctk.CTkFont(family="Segoe UI", size=13), text_color=TXT).pack(side="left", padx=6)
+            ctk.CTkLabel(fila, text=f"▭  Área {i + 1}", font=ctk.CTkFont(family="Segoe UI", size=13), text_color=TXT).pack(side="left", padx=6)
             ctk.CTkLabel(fila, text=f"{z[2] - z[0]}×{z[3] - z[1]} px", font=ctk.CTkFont(family="Segoe UI", size=11), text_color=MUTED).pack(side="left")
             ctk.CTkButton(fila, text="✕", width=28, height=26, corner_radius=7, fg_color=BORDE, hover_color=BAD, text_color=TXT,
                           command=lambda i=i: self._quitar(i)).pack(side="right")
@@ -1024,7 +1133,6 @@ class App(ctk.CTk):
             a, b = sorted((max(0, int(x0)), min(f.width, int(x1)))), sorted((max(0, int(y0)), min(f.height, int(y1))))
             if a[1] - a[0] > 30 and b[1] - b[0] > 16:
                 self.zonas.append([a[0], b[0], a[1], b[1]])
-                self.est.append({"sig": None, "estable": 0, "hecho": None, "dibujo": None, "ocupado": False})
                 self._pintar_zonas()
                 self._guardar_zonas()
         self.sucio = True
@@ -1041,6 +1149,8 @@ class App(ctk.CTk):
     def _guardar_opciones(self):
         o = self.cfg["opciones"]
         o["capa"], o["estilo"], o["velocidad"] = bool(self.sw_capa.get()), bool(self.sw_estilo.get()), self.seg_vel.get()
+        o["sensibilidad"] = self.seg_sens.get()
+        self.velocidad, self.sens = o["velocidad"], o["sensibilidad"]
         guardar_config(self.cfg)
         self.capa_firma = None
 
@@ -1091,8 +1201,7 @@ class App(ctk.CTk):
         """Usa el modelo elegido en «Modelos» (se recarga en segundo plano)."""
         self.listo[tipo] = False
         self.faltan = self._calc_faltan()
-        for e in self.est:
-            e["hecho"] = None
+        self.an.reiniciar()
         threading.Thread(target=self._cargar_modelos, args=((tipo,),), daemon=True).start()
 
     def modelo_descargado(self, m):
@@ -1162,79 +1271,50 @@ class App(ctk.CTk):
             return
         self.gestor = GestorModelos(self)
 
-    def _trabajador(self):
-        while True:
-            gen, i, crop, sig = self.cola_trab.get()
-            try:
-                import traductor_local
-                jp = ocr_region(crop, self.origen)
-                es = traductor_local.traducir_texto(jp) if traductor_local.necesita(jp) else ""
-                self.cola_res.put((gen, i, jp, es, estilo(crop), sig))
-            except Exception as e:
-                self.cola_res.put((gen, i, "", "", None, sig))
-            time.sleep(0.01)
-
     def _alternar(self):
         if not self.activo and self.ocr_problema():
             return
         self.activo = not self.activo
+        self.an.reiniciar()
+        self._firma_textos = None
         if self.activo:
             self.btn_inicio.configure(text="■   Detener traducción", fg_color=BAD, hover_color="#ff8585")
-            for e in self.est:
-                e["hecho"] = None
         else:
             self.btn_inicio.configure(text="▶   Iniciar traducción", fg_color=ACC, hover_color=ACC_H)
             self.capa_firma = None
+        self.sucio = True
 
-    def _ciclo_traduccion(self):
-        ahora = time.time()
-        if ahora - self.t_ciclo < VELOCIDADES.get(self.seg_vel.get(), 0.45) or not (self.listo["ocr"] and self.listo["trad"]):
-            return
-        self.t_ciclo = ahora
-        f = self.cap.frame
-        if f is None:
-            return
-        for i, reg in enumerate(self.zonas):
-            if i >= len(self.est):
-                break
-            crop = f.crop(tuple(reg))
-            sig = firma(crop)
-            e = self.est[i]
-            if e["sig"] is None or np.abs(sig - e["sig"]).mean() > 4:
-                e["sig"], e["estable"] = sig, 0
-            else:
-                e["estable"] += 1
-            nuevo = e["hecho"] is None or np.abs(sig - e["hecho"]).mean() > 4
-            if e["estable"] >= 1 and nuevo and not e["ocupado"]:
-                e["ocupado"] = True
-                self.cola_trab.put((self.gen, i, crop, sig))
+    # ─────────────────────────────── textos detectados (los calcula deteccion.py en segundo plano)
+    def _grupos_visibles(self):
+        return [g for g in self.an.grupos if g["es"] and g["estilo"]] if self.activo else []
 
-    def _recoger(self):
-        while True:
-            try:
-                gen, i, jp, es, est_, sig = self.cola_res.get_nowait()
-            except queue.Empty:
-                return
-            if gen != self.gen or i >= len(self.est):
-                continue
-            e = self.est[i]
-            if est_ is None:   # falló la lectura o la traducción: se reintenta cuando la imagen esté estable otra vez
-                e["ocupado"], e["hecho"], e["sig"] = False, None, None
-                continue
-            e["ocupado"], e["hecho"] = False, sig
-            e["dibujo"] = (es, est_) if es and est_ else None
-            if es:
-                self.ultimo_jp, self.ultimo_es = jp, es
-                self._mostrar_textos(jp, es)
-            self.sucio = True
-            self.capa_firma = None
+    def _maqueta(self, g, ancho_max):
+        """Posición y tamaño con que se dibuja la traducción de un grupo (con memoria para no recalcular)."""
+        est = g["estilo"] if self.sw_estilo.get() else ("#14171d", "#ffffff", g["estilo"][2], False)
+        clave = (g["es"], g["bbox"], est, ancho_max)
+        r = self._maq_cache.get(clave)
+        if r is None:
+            if len(self._maq_cache) > 400:
+                self._maq_cache.clear()
+            r = self._maq_cache[clave] = maquetar(g["es"], g["bbox"], est, self, ancho_max)
+        return r
+
+    def _actualizar_textos(self):
+        gs = [g for g in self.an.grupos if g["es"]] if self.activo else []
+        firma_ = tuple((g["jp"], g["es"]) for g in gs)
+        if firma_ == self._firma_textos:
+            return
+        self._firma_textos = firma_
+        self.ultimo_jp = "\n".join(g["jp"] for g in gs)
+        self.ultimo_es = "\n".join(g["es"] for g in gs)
+        self._mostrar_textos(self.ultimo_jp, self.ultimo_es)
 
     # ─────────────────────────────── vista previa y capa
     def _dibujar_vista(self):
         f, cv = self.cap.frame, self.lienzo
-        if not self.sucio and self.cap.seq == self.seq_dibujado:
+        if not self.sucio and self.cap.seq == self.seq_dibujado and self.an.version == self._ver_dibujada:
             return
-        self.sucio, self.seq_dibujado = False, self.cap.seq
+        self.sucio, self.seq_dibujado, self._ver_dibujada = False, self.cap.seq, self.an.version
         cw, ch = max(50, cv.winfo_width()), max(50, cv.winfo_height())
         cv.delete("all")
         if f is None:
@@ -1248,19 +1328,18 @@ class App(ctk.CTk):
         self.vista = (ox, oy, esc)
         self.foto = ImageTk.PhotoImage(f.resize((w, h), Image.BILINEAR))
         cv.create_image(ox, oy, anchor="nw", image=self.foto)
-        for i, z in enumerate(self.zonas):
-            x0, y0, x1, y1 = ox + z[0] * esc, oy + z[1] * esc, ox + z[2] * esc, oy + z[3] * esc
-            d = self.est[i]["dibujo"] if i < len(self.est) else None
-            if d and self.activo:
-                es, (bg, fg, tam0, neg) = d
-                cv.create_rectangle(x0, y0, x1, y1, fill=bg, outline=OK, width=2)
-                tam = max(8, int(ajustar(es, int((z[2] - z[0])), int(z[3] - z[1]), self, tam0, neg) * esc))
-                cv.create_text(x0 + 6 * esc, y0 + 3 * esc, anchor="nw", text=es, fill=fg, width=max(20, (x1 - x0) - 12 * esc),
-                               font=("Segoe UI", -tam, "bold" if neg else "normal"))
+        for i, z in enumerate(self.zonas):   # áreas opcionales que limitan la detección
+            cv.create_rectangle(ox + z[0] * esc, oy + z[1] * esc, ox + z[2] * esc, oy + z[3] * esc, outline=OK, width=2, dash=(6, 3))
+            cv.create_text(ox + z[0] * esc + 6, oy + z[1] * esc + 6, anchor="nw", text=f"Área {i + 1}", fill=OK, font=("Segoe UI", 9, "bold"))
+        for g in self._grupos_visibles():
+            rect, texto, tam, bg, fg, neg = self._maqueta(g, f.width)
+            x0, y0, x1, y1 = ox + rect[0] * esc, oy + rect[1] * esc, ox + rect[2] * esc, oy + rect[3] * esc
+            cv.create_rectangle(x0, y0, x1, y1, fill=bg, outline="")
+            fuente = ("Segoe UI", -max(7, int(tam * esc)), "bold" if neg else "normal")
+            if "\n" in texto:
+                cv.create_text(x0 + 5 * esc, y0 + 2 * esc, anchor="nw", text=texto, fill=fg, font=fuente)
             else:
-                cv.create_rectangle(x0, y0, x1, y1, outline=OK, width=2, dash=(6, 3))
-            cv.create_rectangle(x0, y0, x0 + 22, y0 + 20, fill=OK, outline="")
-            cv.create_text(x0 + 11, y0 + 10, text=str(i + 1), fill="#06251a", font=("Segoe UI", 10, "bold"))
+                cv.create_text(x0 + 5 * esc, (y0 + y1) / 2, anchor="w", text=texto, fill=fg, font=fuente)
         if self.arrastre:
             a = self.arrastre
             cv.create_rectangle(a[0], a[1], a[2], a[3], outline=ACC, width=2)
@@ -1281,57 +1360,67 @@ class App(ctk.CTk):
             user32.SetWindowDisplayAffinity(h, 0x11)   # no sale en capturas de pantalla (modo de respaldo)
         self.capa.withdraw()
 
+    def _subir_capa(self):
+        """Pone la capa por encima de todo (HWND_TOPMOST) sin quitarle el foco al juego."""
+        self._t_capa = time.time()
+        h = user32.GetParent(self.capa.winfo_id()) or self.capa.winfo_id()
+        user32.SetWindowPos.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+        # HWND_TOPMOST = (HWND)-1; sin mover, sin cambiar tamaño, sin activar
+        user32.SetWindowPos(h, ctypes.c_void_p(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)
+
     def _actualizar_capa(self):
         o = self.cfg["opciones"]
         rect = self.cap.rect
-        ocultar = (not self.activo or not o.get("capa", True) or rect is None or self.cap.frame is None
-                   or self.cap.modo in ("minimizada", "cerrada") or not self.zonas)
-        if ocultar:
+        f = self.cap.frame
+        if (not self.activo or not o.get("capa", True) or rect is None or f is None
+                or self.cap.modo in ("minimizada", "cerrada")):
             self.capa.withdraw()
+            self.capa_firma = None
             return
         l, t, r, b = rect
         items, tapadas = [], 0
-        for i, z in enumerate(self.zonas):
-            d = self.est[i]["dibujo"] if i < len(self.est) else None
-            if not d:
-                continue
-            pts = [(l + z[0] + 6, t + z[1] + 6), (l + (z[0] + z[2]) // 2, t + (z[1] + z[3]) // 2), (l + z[2] - 6, t + z[3] - 6)]
+        for g in self._grupos_visibles():
+            m = self._maqueta(g, f.width)
+            x0, y0, x1, y1 = m[0]
+            pts = [(l + x0 + 4, t + y0 + 4), (l + (x0 + x1) // 2, t + (y0 + y1) // 2), (l + x1 - 4, t + y1 - 4)]
             if all(visible_en(self.hwnd, x, y) for x, y in pts):
-                items.append((tuple(z), d[0], d[1]))
+                items.append(m)
             else:
                 tapadas += 1
         self.tapadas = tapadas
-        firma_ = (rect, tuple((z, es) for z, es, _ in items), bool(self.sw_estilo.get()))
+        firma_ = (rect, tuple((m[0], m[1]) for m in items), bool(self.sw_estilo.get()))
+        ahora = time.time()
         if firma_ == self.capa_firma:
+            if items and ahora - self._t_capa > 1.0:   # Windows puede reordenar las ventanas «siempre encima»: se vuelve a subir
+                self._subir_capa()
             return
+        self._t_capa = ahora
         self.capa_firma = firma_
         if not items:
             self.capa.withdraw()
             return
         self.capa.geometry(f"{r - l}x{b - t}+{l}+{t}")
         self.capa.deiconify()
+        self._subir_capa()
         cv = self.capa_cv
         cv.delete("all")
-        for z, es, (bg, fg, tam0, neg) in items:
-            x0, y0, x1, y1 = z
-            if not self.sw_estilo.get():
-                bg, fg, tam0, neg = "#14171d", "#ffffff", 22, False
+        for (x0, y0, x1, y1), texto, tam, bg, fg, neg in items:
             cv.create_rectangle(x0, y0, x1, y1, fill=bg, outline="")
-            tam = ajustar(es, x1 - x0, y1 - y0, self, tam0, neg)
-            cv.create_text(x0 + 6, y0 + 3, anchor="nw", text=es, fill=fg, width=x1 - x0 - 12, font=("Segoe UI", -tam, "bold" if neg else "normal"))
+            fuente = ("Segoe UI", -tam, "bold" if neg else "normal")
+            if "\n" in texto:
+                cv.create_text(x0 + 5, y0 + 2, anchor="nw", text=texto, fill=fg, font=fuente)
+            else:
+                cv.create_text(x0 + 5, (y0 + y1) / 2, anchor="w", text=texto, fill=fg, font=fuente)
 
     # ─────────────────────────────── bucle principal
     def _tick(self):
         try:
-            self.tapadas = getattr(self, "tapadas", 0)
-            self._recoger()
-            if self.activo:
-                self._ciclo_traduccion()
             self._dibujar_vista()
             self._actualizar_capa()
+            self._actualizar_textos()
             self._actualizar_estado()
-        except Exception:
-            pass
+        except Exception as e:
+            self.an.error = "interfaz: " + str(e)[:60]
         self.after(110, self._tick)
 
     def _actualizar_estado(self):
@@ -1356,8 +1445,6 @@ class App(ctk.CTk):
             txt = "Error al cargar los modelos: " + L["error"]
         elif self.ocr_problema():
             txt = self.ocr_problema()
-        elif not self.zonas:
-            txt = "Arrastra sobre la vista para marcar el texto, o pulsa «Sugerir cuadro de diálogo»."
         elif not (L["ocr"] and L["trad"]):
             txt = "Cargando los modelos de OCR y traducción (la primera vez tarda un poco)…"
         elif not self.activo:
@@ -1365,11 +1452,14 @@ class App(ctk.CTk):
         elif self.tapadas and self.cfg["opciones"].get("capa", True):
             txt = "Traduciendo · la ventana está tapada: la capa se oculta, mira la traducción aquí en el panel."
         else:
-            txt = "Traduciendo en vivo…"
+            n = sum(1 for g in self.an.grupos if g["es"])
+            txt = (f"Traduciendo en vivo · {n} texto(s) en pantalla" if n else
+                   f"Buscando texto en la ventana… ({self.an.n_detectadas} candidato(s))") + (f"  ·  {self.an.error}" if self.an.error else "")
         self.lbl_estado.configure(text=txt)
 
     def _cerrar(self):
         self.cap.parar()
+        self.an.parar()
         try:
             self.capa.destroy()
         except Exception:

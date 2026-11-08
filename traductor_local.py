@@ -23,6 +23,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).parent))
+import idiomas
 import traducir  # modelo NLLB local (ja -> es)
 
 JA = re.compile(r"[぀-ヿ㐀-䶿一-鿿ｦ-ﾟ]")
@@ -47,6 +48,10 @@ def traducir_texto(texto: str) -> str:
             continue
         if not necesita(linea):
             salida.append(linea)
+            continue
+        glos = idiomas.buscar_glosario(linea, traducir.ORIGEN, traducir.DESTINO)   # menús y botones típicos
+        if glos:
+            salida.append(glos)
             continue
         if linea in _cache:
             salida.append(_cache[linea])
