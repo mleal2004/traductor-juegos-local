@@ -43,6 +43,9 @@ Las carpetas `modelo_nllb` y `modelo_ocr` deben quedar junto a los scripts. Tamb
 ### Detección automática
 El traductor busca el texto solo en cada fotograma (no hace falta marcar nada). Si quieres, puedes limitar la búsqueda arrastrando un área sobre la vista. El ajuste «Sensibilidad» controla cuánto texto dudoso se acepta. Las opciones de menú más comunes (Nueva partida, Continuar, Opciones, Salir…) se traducen con un glosario porque el modelo falla con frases muy cortas.
 
+### Captura sin parpadeo
+El ajuste «Captura» tiene tres modos: **Auto** (foto de la pantalla mientras la ventana está a la vista, que no toca el juego, y captura directa de la ventana solo cuando otra app la tapa), **Ventana** (siempre directa; funciona aunque esté tapada, pero algunos juegos parpadean con ella) y **Pantalla**. La capa de traducción actualiza solo el texto que cambió, así que tampoco parpadea. Si un juego usa pantalla completa exclusiva, ponlo en modo ventana sin bordes.
+
 ### Idiomas y OCR
 La traducción acepta los 202 idiomas de NLLB-200 (elige origen y destino en la barra superior). El OCR usa **manga-ocr** para japonés y el **OCR de Windows** para el resto de idiomas: Windows solo lee los idiomas que tengan su paquete de OCR instalado (Configuración → Hora e idioma → Idioma y región → Añadir un idioma).
 

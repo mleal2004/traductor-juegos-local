@@ -546,9 +546,21 @@ def print_window(h):
     return Image.frombuffer("RGBA", (w, hh), buf, "raw", "BGRA", 0, 1).convert("RGB"), r
 
 
-def capturar(h):
-    """(imagen del área visible, rectángulo en pantalla, modo). Modo: 'directa' o 'pantalla' (respaldo)."""
+def capturar(h, pref="Auto"):
+    """(imagen del área visible, rectángulo en pantalla, modo).
+    Modo 'pantalla': foto de la pantalla (no toca el juego, no parpadea; solo sirve si la ventana está a la vista).
+    Modo 'directa': pide el contenido a la propia ventana (funciona aunque esté tapada, pero algunos juegos parpadean).
+    pref: 'Auto' = pantalla si la ventana está a la vista y directa si está tapada; 'Ventana' o 'Pantalla' fuerzan uno."""
     l, t, rr, b = rect_visible(h)
+    if pref != "Ventana":
+        xs, ys = (l + 8, (l + rr) // 2, rr - 8), (t + 8, (t + b) // 2, b - 8)
+        if pref == "Pantalla" or all(visible_en(h, x, y) for x in xs for y in ys):
+            try:
+                img = ImageGrab.grab(bbox=(l, t, rr, b), all_screens=True)
+                if np.asarray(img.resize((64, 36))).max() > 2:
+                    return img, (l, t, rr, b), "pantalla"
+            except Exception:
+                pass
     img, wr = print_window(h)
     if img is not None and np.asarray(img.resize((64, 36))).max() > 2:
         ox, oy = max(0, l - wr.left), max(0, t - wr.top)
@@ -573,7 +585,7 @@ class Capturador(threading.Thread):
     def __init__(self):
         super().__init__(daemon=True)
         self.hwnd, self.frame, self.rect, self.seq, self.modo = None, None, None, 0, "—"
-        self.intervalo, self._fin = 0.12, False
+        self.intervalo, self._fin, self.pref = 0.10, False, "Auto"
 
     def run(self):
         while not self._fin:
@@ -585,10 +597,11 @@ class Capturador(threading.Thread):
                     self.modo = "minimizada"
                 else:
                     try:
-                        img, rect, modo = capturar(h)
+                        img, rect, modo = capturar(h, self.pref)
                         if img is not None:
                             self.frame, self.rect, self.modo = img, rect, modo
                             self.seq += 1
+                            self.intervalo = 0.10 if modo == "pantalla" else 0.22   # la captura directa es más pesada: menos veces
                     except Exception:
                         pass
             time.sleep(self.intervalo)
@@ -874,11 +887,13 @@ class App(ctk.CTk):
         self._maq_cache = {}
         self.tapadas = 0
         self._t_capa = 0.0
+        self.capa_visible, self._capa_rect, self._capa_ids, self._t_vacio = False, None, [], 0.0
         o_ = self.cfg["opciones"]
         self.origen = org or o_.get("origen", "jpn_Jpan")
         self.destino = dst or o_.get("destino", "spa_Latn")
         self.velocidad = o_.get("velocidad", "Normal")
         self.sens = o_.get("sensibilidad", "Media")
+        self.cap.pref = o_.get("captura", "Auto")
         self.faltan = self._calc_faltan()
         self.an = deteccion.Analizador(self, dict(
             usa_manga=usa_manga, ocr_cajas=ocr_cajas, ocr_ventana=ocr_ventana, estilo=estilo,
@@ -968,9 +983,8 @@ class App(ctk.CTk):
                      font=F(12), text_color=MUTED).grid(row=2, column=0, pady=(8, 12))
 
         # Panel derecho
-        der = ctk.CTkFrame(self, fg_color=SURF, corner_radius=14, width=350)
+        der = ctk.CTkScrollableFrame(self, fg_color=SURF, corner_radius=14, width=330)
         der.grid(row=1, column=2, sticky="ns", padx=(8, 16), pady=14)
-        der.grid_propagate(False)
         der.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(der, text="2 · ÁREAS (OPCIONAL)", font=F(11, "bold"), text_color=ACC).grid(row=0, column=0, sticky="w", padx=16, pady=(14, 4))
         self.zonas_frame = ctk.CTkFrame(der, fg_color=SURF2, corner_radius=10)
@@ -1001,8 +1015,14 @@ class App(ctk.CTk):
                      justify="left").pack(anchor="w", padx=14, pady=(2, 2))
         self.seg_sens = ctk.CTkSegmentedButton(aj, values=["Baja", "Media", "Alta"], font=F(12), selected_color=ACC, selected_hover_color=ACC_H,
                                                unselected_color=BORDE, command=lambda v: self._guardar_opciones())
-        self.seg_sens.pack(fill="x", padx=14, pady=(0, 14))
+        self.seg_sens.pack(fill="x", padx=14, pady=(0, 8))
         self.seg_sens.set(self.sens)
+        ctk.CTkLabel(aj, text="Captura de la ventana (Auto evita el parpadeo del juego)", font=F(12), text_color=MUTED, wraplength=300,
+                     justify="left").pack(anchor="w", padx=14, pady=(2, 2))
+        self.seg_cap = ctk.CTkSegmentedButton(aj, values=["Auto", "Ventana", "Pantalla"], font=F(12), selected_color=ACC, selected_hover_color=ACC_H,
+                                              unselected_color=BORDE, command=lambda v: self._guardar_opciones())
+        self.seg_cap.pack(fill="x", padx=14, pady=(0, 14))
+        self.seg_cap.set(o.get("captura", "Auto"))
 
         ctk.CTkLabel(der, text="4 · TRADUCCIÓN", font=F(11, "bold"), text_color=ACC).grid(row=5, column=0, sticky="w", padx=16, pady=(10, 4))
         res = ctk.CTkFrame(der, fg_color=SURF2, corner_radius=10)
@@ -1149,8 +1169,8 @@ class App(ctk.CTk):
     def _guardar_opciones(self):
         o = self.cfg["opciones"]
         o["capa"], o["estilo"], o["velocidad"] = bool(self.sw_capa.get()), bool(self.sw_estilo.get()), self.seg_vel.get()
-        o["sensibilidad"] = self.seg_sens.get()
-        self.velocidad, self.sens = o["velocidad"], o["sensibilidad"]
+        o["sensibilidad"], o["captura"] = self.seg_sens.get(), self.seg_cap.get()
+        self.velocidad, self.sens, self.cap.pref = o["velocidad"], o["sensibilidad"], o["captura"]
         guardar_config(self.cfg)
         self.capa_firma = None
 
@@ -1372,10 +1392,10 @@ class App(ctk.CTk):
         o = self.cfg["opciones"]
         rect = self.cap.rect
         f = self.cap.frame
+        ahora = time.time()
         if (not self.activo or not o.get("capa", True) or rect is None or f is None
                 or self.cap.modo in ("minimizada", "cerrada")):
-            self.capa.withdraw()
-            self.capa_firma = None
+            self._ocultar_capa()
             return
         l, t, r, b = rect
         items, tapadas = [], 0
@@ -1388,29 +1408,60 @@ class App(ctk.CTk):
             else:
                 tapadas += 1
         self.tapadas = tapadas
-        firma_ = (rect, tuple((m[0], m[1]) for m in items), bool(self.sw_estilo.get()))
-        ahora = time.time()
-        if firma_ == self.capa_firma:
-            if items and ahora - self._t_capa > 1.0:   # Windows puede reordenar las ventanas «siempre encima»: se vuelve a subir
-                self._subir_capa()
-            return
-        self._t_capa = ahora
-        self.capa_firma = firma_
         if not items:
-            self.capa.withdraw()
+            # si por un instante no hay textos (una detección fallida), no se oculta la capa: evita el parpadeo
+            if self.capa_visible and ahora - self._t_vacio > 0.7:
+                self._ocultar_capa()
+            elif not self.capa_visible:
+                self._t_vacio = ahora
+            if self.capa_visible and self._t_vacio == 0.0:
+                self._t_vacio = ahora
             return
-        self.capa.geometry(f"{r - l}x{b - t}+{l}+{t}")
-        self.capa.deiconify()
-        self._subir_capa()
-        cv = self.capa_cv
-        cv.delete("all")
-        for (x0, y0, x1, y1), texto, tam, bg, fg, neg in items:
-            cv.create_rectangle(x0, y0, x1, y1, fill=bg, outline="")
+        self._t_vacio = 0.0
+        if rect != self._capa_rect:                       # solo se mueve/redimensiona si la ventana cambió
+            self.capa.geometry(f"{r - l}x{b - t}+{l}+{t}")
+            self._capa_rect = rect
+        if not self.capa_visible:
+            self.capa.deiconify()
+            self.capa_visible = True
+            self._subir_capa()
+        self._pintar_capa(items)
+        # Windows puede reordenar las ventanas «siempre encima»: se vuelve a subir solo si algo quedó por encima
+        h = user32.GetParent(self.capa.winfo_id()) or self.capa.winfo_id()
+        if ahora - self._t_capa > 1.0 and user32.GetWindow(h, 3):
+            self._subir_capa()
+
+    def _ocultar_capa(self):
+        if self.capa_visible:
+            self.capa.withdraw()
+            self.capa_visible = False
+        self._t_vacio, self._capa_rect = 0.0, None
+        self._capa_ids = self._capa_ids[:0]
+        self.capa_cv.delete("all")
+
+    def _pintar_capa(self, items):
+        """Dibuja los textos actualizando solo lo que cambió (sin borrar todo: así no parpadea)."""
+        cv, ids = self.capa_cv, self._capa_ids
+        for i, m in enumerate(items):
+            (x0, y0, x1, y1), texto, tam, bg, fg, neg = m
+            multi = "\n" in texto
             fuente = ("Segoe UI", -tam, "bold" if neg else "normal")
-            if "\n" in texto:
-                cv.create_text(x0 + 5, y0 + 2, anchor="nw", text=texto, fill=fg, font=fuente)
-            else:
-                cv.create_text(x0 + 5, (y0 + y1) / 2, anchor="w", text=texto, fill=fg, font=fuente)
+            tx, ty, anc = (x0 + 5, y0 + 2, "nw") if multi else (x0 + 5, (y0 + y1) / 2, "w")
+            if i >= len(ids):
+                rid = cv.create_rectangle(x0, y0, x1, y1, fill=bg, outline="")
+                tid = cv.create_text(tx, ty, anchor=anc, text=texto, fill=fg, font=fuente)
+                ids.append([rid, tid, m])
+            elif ids[i][2] != m:
+                rid, tid, _ = ids[i]
+                cv.coords(rid, x0, y0, x1, y1)
+                cv.itemconfig(rid, fill=bg)
+                cv.coords(tid, tx, ty)
+                cv.itemconfig(tid, text=texto, fill=fg, font=fuente, anchor=anc)
+                ids[i][2] = m
+        for rid, tid, _ in ids[len(items):]:
+            cv.delete(rid)
+            cv.delete(tid)
+        del ids[len(items):]
 
     # ─────────────────────────────── bucle principal
     def _tick(self):
@@ -1434,9 +1485,9 @@ class App(ctk.CTk):
         else:
             self.chip_mod.configure(text="● Modelos: cargando…", text_color=WARN)
         m = self.cap.modo
-        self.chip_cap.configure(text={"directa": "● Captura: directa (funciona si está tapada)", "pantalla": "● Captura: pantalla (debe verse la ventana)",
+        self.chip_cap.configure(text={"directa": "● Captura: directa (ventana tapada)", "pantalla": "● Captura: pantalla (sin parpadeo)",
                                       "minimizada": "● Captura: ventana minimizada", "cerrada": "● Captura: ventana cerrada"}.get(m, "● Captura: —"),
-                                text_color={"directa": OK, "pantalla": WARN}.get(m, MUTED))
+                                text_color={"directa": WARN, "pantalla": OK}.get(m, MUTED))
         if self.faltan:
             txt = "Faltan modelos: pulsa «⬇ Modelos» (arriba a la derecha) y descárgalos."
         elif not self.hwnd:

@@ -405,6 +405,17 @@ class Analizador:
                 self.pend_trad.add(jp)
                 self.cola.put(("trad", self.gen, jp))
             salida.append({"bbox": bbox, "jp": jp, "es": es, "estilo": g[0]["estilo"], "n": len(g)})
+        # estabilizar para que no parpadee: se conserva la posición anterior si casi no cambió (la detección «tiembla» unos píxeles),
+        # y un texto que desaparece de golpe se mantiene unos ciclos por si fue solo un fallo de detección
+        viejos = self.grupos
+        for g in salida:
+            for v in viejos:
+                if v["jp"] == g["jp"] and max(abs(a - b) for a, b in zip(v["bbox"], g["bbox"])) <= 4:
+                    g["bbox"] = v["bbox"]
+                    break
+        for v in viejos:
+            if v["es"] and v.get("fantasma", 0) < 5 and not any(iou(v["bbox"], g["bbox"]) > 0.5 for g in salida):
+                salida.append(dict(v, fantasma=v.get("fantasma", 0) + 1))
         firma_nueva = [(g["bbox"], g["jp"], g["es"]) for g in salida]
         if firma_nueva != [(g["bbox"], g["jp"], g["es"]) for g in self.grupos]:
             self.version += 1
