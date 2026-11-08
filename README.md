@@ -15,7 +15,9 @@ Herramientas para **traducir del japonés al español, sin internet**, textos de
 | `traducir_unity_raw.py` | Unity (Mono): busca cadenas japonesas serializadas en `level*`/`*.assets` y las reescribe en español. |
 | `traducir_godot_pck.py` | Godot 4: traduce los `.translation` de un `.pck` y lo reempaqueta. |
 | `traductor_local.py` | Servidor local (API tipo LibreTranslate) y ventana que traduce lo que copies al portapapeles. |
-| `traductor_ocr.py` | Lee con OCR la ventana de un juego y dibuja la traducción encima, imitando color y tamaño. |
+| `traductor_ocr.py` | **Aplicación con interfaz**: vista en vivo de la ventana de un juego (aunque otra app la tape), OCR y traducción en tiempo real, capa sobre el juego, selector de 202 idiomas y gestor para descargar/listar/elegir/eliminar modelos. |
+| `idiomas.py` | Los 202 idiomas del modelo con nombre en español y su equivalencia con el OCR de Windows. |
+| `ocr_windows.ps1` | Puente con el OCR integrado de Windows (para idiomas distintos del japonés). |
 
 ## Instalación
 
@@ -35,7 +37,10 @@ python -c "from huggingface_hub import snapshot_download as s; s('OpenNMT/nllb-2
 python -c "from huggingface_hub import snapshot_download as s; s('kha-white/manga-ocr-base', local_dir='modelo_ocr', allow_patterns=['*.json','*.txt','*.bin'])"
 ```
 
-Las carpetas `modelo_nllb` y `modelo_ocr` deben quedar junto a los scripts.
+Las carpetas `modelo_nllb` y `modelo_ocr` deben quedar junto a los scripts. También puedes descargarlos (y otros más ligeros o más precisos) desde la propia aplicación `traductor_ocr.py`, botón **⬇ Modelos**.
+
+### Idiomas y OCR
+La traducción acepta los 202 idiomas de NLLB-200 (elige origen y destino en la barra superior). El OCR usa **manga-ocr** para japonés y el **OCR de Windows** para el resto de idiomas: Windows solo lee los idiomas que tengan su paquete de OCR instalado (Configuración → Hora e idioma → Idioma y región → Añadir un idioma).
 
 ## Uso
 
@@ -55,8 +60,9 @@ python traducir_unity_raw.py "juego\juego_Data"
 # Godot 4
 python traducir_godot_pck.py "juego\juego.pck"
 
-# Traductor en vivo por OCR (te pregunta la ventana y las zonas de texto)
+# Traductor en vivo por OCR (aplicación con interfaz)
 python traductor_ocr.py
+python traductor_ocr.py --ventana "parte del título" --origen eng_Latn --destino spa_Latn --auto
 
 # Servidor local (127.0.0.1:5000) o ventana de portapapeles
 python traductor_local.py servidor

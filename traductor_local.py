@@ -28,6 +28,14 @@ import traducir  # modelo NLLB local (ja -> es)
 JA = re.compile(r"[぀-ヿ㐀-䶿一-鿿ｦ-ﾟ]")
 _lock = threading.Lock()
 _cache: dict[str, str] = {}
+JA = re.compile("[぀-ヿ㐀-䶿一-鿿ｦ-ﾟ가-힯]")   # japonés, chino y coreano
+
+
+def necesita(linea: str) -> bool:
+    """¿La línea tiene texto en el idioma de origen que valga la pena traducir?"""
+    if traducir.ORIGEN.split("_")[0] in ("jpn", "zho", "yue", "kor"):
+        return bool(JA.search(linea))
+    return any(c.isalpha() for c in linea)
 
 
 def traducir_texto(texto: str) -> str:
@@ -37,7 +45,7 @@ def traducir_texto(texto: str) -> str:
         if not linea.strip():
             salida.append("")
             continue
-        if not JA.search(linea):
+        if not necesita(linea):
             salida.append(linea)
             continue
         if linea in _cache:
@@ -123,7 +131,7 @@ def portapapeles():
             t = ""
         if t != estado["ultimo"]:
             estado["ultimo"] = t
-            if JA.search(t):
+            if necesita(t):
                 threading.Thread(target=trabajar, args=(t,), daemon=True).start()
         raiz.after(300, revisar)
 

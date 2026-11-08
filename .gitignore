@@ -19,3 +19,7 @@ data_original_ja/
 
 __pycache__/
 *.pyc
+
+# Ajustes locales del traductor OCR y modelos descargados desde la app
+traductor_ocr_config.json
+modelos/

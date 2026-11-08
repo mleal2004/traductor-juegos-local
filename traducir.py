@@ -18,6 +18,7 @@ import ctranslate2
 from transformers import AutoTokenizer
 
 MODELO = Path(__file__).parent / "modelo_nllb"
+ORIGEN, DESTINO = "jpn_Jpan", "spa_Latn"   # códigos NLLB-200 (ver idiomas.py); se cambian con configurar_idiomas()
 EXTENSIONES = {".txt", ".md"}
 CODIFICACIONES = ("utf-8-sig", "cp932", "utf-16")  # cp932 = Shift-JIS de Windows
 MAX_CHARS = 300  # las líneas más largas se parten por frases
@@ -30,13 +31,25 @@ EXCLUIR = ("credits.html", "lib_burst_generated.txt", "bakinplayer_log.txt",
 _tok = _trad = None
 
 
+_tok_lang = None
+
+
 def cargar_modelo():
-    global _tok, _trad
+    global _tok, _trad, _tok_lang
     if _trad is None:
         print("[cargando modelo...]")
-        _tok = AutoTokenizer.from_pretrained(str(MODELO), src_lang="jpn_Jpan")
         _trad = ctranslate2.Translator(str(MODELO), device="cpu", compute_type="int8",
                                        intra_threads=8)
+    if _tok is None or _tok_lang != ORIGEN:   # el tokenizador se recrea solo al cambiar el idioma de origen (es rápido)
+        _tok = AutoTokenizer.from_pretrained(str(MODELO), src_lang=ORIGEN)
+        _tok_lang = ORIGEN
+
+
+def configurar_idiomas(origen: str, destino: str):
+    """Cambia el par de idiomas (códigos NLLB, p. ej. 'eng_Latn' → 'spa_Latn') sin recargar el modelo.
+    El cambio se aplica en la siguiente llamada a cargar_modelo(), así que es seguro hacerlo mientras se traduce."""
+    global ORIGEN, DESTINO
+    ORIGEN, DESTINO = origen, destino
 
 
 def leer(ruta: Path) -> str:
@@ -53,7 +66,7 @@ def partir(linea: str) -> list[str]:
     """Parte una línea larga en frases de hasta MAX_CHARS caracteres."""
     if len(linea) <= MAX_CHARS:
         return [linea]
-    frases = re.findall(r".+?(?:[。！？!?]+|$)", linea)
+    frases = re.findall(r".+?(?:[。！？!?]+|[.]+\s|$)", linea)
     trozos, actual = [], ""
     for f in frases:
         if len(actual) + len(f) > MAX_CHARS and actual:
@@ -67,7 +80,7 @@ def partir(linea: str) -> list[str]:
 
 def traducir_lote(frases: list[str]) -> list[str]:
     tokens = [_tok.convert_ids_to_tokens(_tok.encode(f)) for f in frases]
-    res = _trad.translate_batch(tokens, target_prefix=[["spa_Latn"]] * len(frases),
+    res = _trad.translate_batch(tokens, target_prefix=[[DESTINO]] * len(frases),
                                 beam_size=4, max_decoding_length=512,
                                 no_repeat_ngram_size=3, repetition_penalty=1.15)
     salida = []
