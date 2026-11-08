@@ -1,0 +1,8 @@
+ctranslate2
+transformers
+huggingface_hub
+UnityPy
+pykakasi
+pillow
+numpy
+torch

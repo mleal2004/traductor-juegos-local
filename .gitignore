@@ -1,0 +1,21 @@
+# Modelos (se descargan aparte)
+modelo_nllb/
+modelo_ocr/
+
+# Cachés de traducción y configuración local (contienen textos de los juegos)
+traduccion_cache.json
+traductor_ocr_regiones.json
+
+# Respaldos y datos de juegos
+*.bak_antes_de_traducir
+*.bak_antes_de_trucos
+data_original_ja/
+*.pck
+*.bundle
+*.assets
+*.sav
+*.xp3
+*.rbpack
+
+__pycache__/
+*.pyc
