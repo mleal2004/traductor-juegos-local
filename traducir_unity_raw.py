@@ -92,7 +92,8 @@ def main():
     cache_f = datos.parent / "traduccion_cache.json"
     if cache_f.exists():
         cache = json.loads(cache_f.read_text(encoding="utf-8"))
-    archivos = sorted(p for p in datos.iterdir() if p.is_file() and ARCHIVOS.fullmatch(p.name))
+    solo = next((a.split("=", 1)[1].split(",") for a in sys.argv[1:] if a.startswith("--solo=")), None)   # --solo=level1,level3
+    archivos = sorted(p for p in datos.iterdir() if p.is_file() and ARCHIVOS.fullmatch(p.name) and (solo is None or p.name in solo))
     # Fuente: siempre el respaldo si existe
     fuentes = {}
     for p in archivos:

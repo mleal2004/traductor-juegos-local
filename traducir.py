@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 import ctranslate2
-from transformers import AutoTokenizer
+from tokenizers import Tokenizer   # solo el tokenizador (no hace falta PyTorch)
 
 MODELO = Path(__file__).parent / "modelo_nllb"
 ORIGEN, DESTINO = "jpn_Jpan", "spa_Latn"   # códigos NLLB-200 (ver idiomas.py); se cambian con configurar_idiomas()
@@ -34,6 +34,20 @@ _tok = _trad = None
 _tok_lang = None
 
 
+class _Tok:
+    """Envoltorio mínimo del tokenizador NLLB: [idioma] + trozos + </s>."""
+
+    def __init__(self, t, origen):
+        self.t, self.origen = t, origen
+
+    def tokens(self, texto):
+        return [self.origen] + self.t.encode(texto, add_special_tokens=False).tokens + ["</s>"]
+
+    def decode(self, tokens):
+        ids = [self.t.token_to_id(x) for x in tokens]
+        return self.t.decode([i for i in ids if i is not None], skip_special_tokens=True)
+
+
 def cargar_modelo():
     global _tok, _trad, _tok_lang
     if _trad is None:
@@ -41,7 +55,7 @@ def cargar_modelo():
         _trad = ctranslate2.Translator(str(MODELO), device="cpu", compute_type="int8",
                                        intra_threads=8)
     if _tok is None or _tok_lang != ORIGEN:   # el tokenizador se recrea solo al cambiar el idioma de origen (es rápido)
-        _tok = AutoTokenizer.from_pretrained(str(MODELO), src_lang=ORIGEN)
+        _tok = _Tok(Tokenizer.from_file(str(Path(MODELO) / "tokenizer.json")), ORIGEN)
         _tok_lang = ORIGEN
 
 
@@ -79,14 +93,13 @@ def partir(linea: str) -> list[str]:
 
 
 def traducir_lote(frases: list[str]) -> list[str]:
-    tokens = [_tok.convert_ids_to_tokens(_tok.encode(f)) for f in frases]
+    tokens = [_tok.tokens(f) for f in frases]
     res = _trad.translate_batch(tokens, target_prefix=[[DESTINO]] * len(frases),
                                 beam_size=4, max_decoding_length=512,
                                 no_repeat_ngram_size=3, repetition_penalty=1.15)
     salida = []
     for r in res:
-        ids = _tok.convert_tokens_to_ids(r.hypotheses[0][1:])  # quita el prefijo de idioma
-        salida.append(_tok.decode(ids, skip_special_tokens=True))
+        salida.append(_tok.decode(r.hypotheses[0][1:]))  # quita el prefijo de idioma
     return salida
 
 
